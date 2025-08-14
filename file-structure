@@ -1,0 +1,70 @@
+/github.com/imadgeboyega/kiekky-backend
+├── cmd/
+│   └── api/
+│       └── main.go                    # Entry point - bootstraps application
+│
+├── internal/                          # Private application code
+│   ├── auth/                          # Authentication domain
+│   │   ├── models.go                  # User, Session, Request/Response types
+│   │   ├── service.go                 # Business logic (signup, signin, OAuth, OTP)
+│   │   ├── repository.go              # Database operations (PostgreSQL)
+│   │   ├── handlers.go                # HTTP handlers for auth endpoints
+│   │   └── middleware.go              # JWT validation middleware
+│   │
+│   ├── profile/                       # Profile domain (NEW)
+│   │   ├── models.go                  # Profile data structures
+│   │   ├── service.go                 # Profile business logic
+│   │   ├── repository.go              # Profile database operations
+│   │   ├── handlers.go                # Profile HTTP endpoints
+│   │   └── routes.go                  # Profile route registration
+│   │
+│   ├── otp/                          # OTP service (NEW)
+│   │   ├── models.go                  # OTP data structures
+│   │   ├── service.go                 # OTP generation/validation logic
+│   │   ├── repository.go              # OTP storage (Redis/PostgreSQL)
+│   │   └── providers.go               # Email/SMS providers
+│   │
+│   ├── posts/                        # Posts domain (EXISTING)
+│   │   ├── models.go                  # Post, Comment, Like types
+│   │   ├── service.go                 # Posts business logic
+│   │   ├── repository.go              # Posts database operations
+│   │   ├── handlers.go                # Posts HTTP endpoints
+│   │   ├── routes.go                  # Posts route registration
+│   │   └── upload.go                  # Media upload service
+│   │
+│   ├── notifications/                 # Notifications (NEW)
+│   │   ├── models.go                  # Notification types
+│   │   ├── service.go                 # Notification logic
+│   │   ├── repository.go              # Notification storage
+│   │   └── handlers.go                # Notification endpoints
+│   │
+│   ├── config/                        # Configuration management
+│   │   └── config.go                  # Environment variables & app config
+│   │
+│   └── common/                        # Shared utilities
+│       ├── database/                  # Database connections
+│       │   ├── postgres.go            # PostgreSQL connection setup
+│       │   └── redis.go               # Redis connection setup
+│       │
+│       └── utils/                     # Helper functions
+│           ├── response.go            # Standardized API responses
+│           ├── validator.go           # Input validation helpers
+│           ├── jwt.go                 # JWT token generation/validation
+│           └── email.go               # Email sending utility (NEW)
+│
+├── migrations/                        # Database migrations
+│   ├── 001_initial_schema.sql        # Users, sessions, posts tables
+│   ├── 002_profile_fields.sql        # Extended profile fields (NEW)
+│   └── 003_otp_tables.sql           # OTP tracking tables (NEW)
+│
+├── templates/                         # Email templates (NEW)
+│   ├── otp_verification.html         # OTP email template
+│   ├── welcome.html                  # Welcome email
+│   └── password_reset.html           # Password reset email
+│
+├── .env                              # Environment variables
+├── .env.example                      # Example environment file
+├── go.mod                            # Go module definition
+├── go.sum                            # Go module checksums
+├── Makefile                          # Build and run commands
+└── README.md                         # Project documentation
