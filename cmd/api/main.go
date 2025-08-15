@@ -20,13 +20,16 @@ import (
     "github.com/jmoiron/sqlx"
     "github.com/joho/godotenv"
     "github.com/go-redis/redis/v8"
+    "github.com/aws/aws-sdk-go/aws"
+    "github.com/aws/aws-sdk-go/aws/session"
     
     // Internal packages
     "github.com/imadgeboyega/kiekky-backend/internal/auth"
     "github.com/imadgeboyega/kiekky-backend/internal/otp"
     "github.com/imadgeboyega/kiekky-backend/internal/profile"
     "github.com/imadgeboyega/kiekky-backend/internal/stories"
-    "github.com/imadgeboyega/kiekky-backend/internal/posts" 
+    "github.com/imadgeboyega/kiekky-backend/internal/posts"
+    "github.com/imadgeboyega/kiekky-backend/internal/messaging"
     "github.com/imadgeboyega/kiekky-backend/internal/common/database"
     "github.com/imadgeboyega/kiekky-backend/internal/config"
 )
@@ -103,7 +106,7 @@ func main() {
     }
     log.Println("✅ Database migrations completed")
     
-    // 7. Initialize OTP system (NEW)
+    // 7. Initialize OTP system
     log.Println("\n📱 Step 7: Initializing OTP system...")
     
     // Create OTP repository
@@ -162,7 +165,7 @@ func main() {
     // Start OTP cleanup job
     go startOTPCleanup(otpService)
     
-    // 8. Initialize Profile system (NEW)
+    // 8. Initialize Profile system
     log.Println("\n👤 Step 8: Initializing Profile system...")
     
     // Create profile repository
@@ -190,7 +193,7 @@ func main() {
     profileHandler := profile.NewHandler(profileService)
     log.Println("✅ Profile system initialized")
     
-    // 9. Initialize Auth system (UPDATED to use OTP service)
+    // 9. Initialize Auth system
     log.Println("\n🔐 Step 9: Initializing authentication system...")
     
     authRepo := auth.NewPostgresRepository(db)
@@ -229,8 +232,186 @@ func main() {
     
     log.Println("✅ Posts module initialized")
     
-    // 11. Setup routes
-    log.Println("\n🛣️  Step 11: Setting up routes...")
+    // 11. Initialize Stories module
+    log.Println("\n📸 Step 11: Initializing Stories module...")
+
+    storiesRepo := stories.NewPostgresRepository(sqlx.NewDb(db, "postgres"))
+    storiesUploadService := stories.NewUploadService(uploadConfig)
+    storiesService := stories.NewService(storiesRepo, storiesUploadService)
+    storiesHandler := stories.NewHandler(storiesService)
+
+    // Start cleanup job
+    cleanupService := stories.NewCleanupService(storiesService)
+    go cleanupService.Start(context.Background())
+
+    log.Println("✅ Stories module initialized") 
+    
+    // ====================================
+    // Notifications Module Initialization
+    // ====================================
+    log.Println("\n🔔 Step 12: Initializing Notifications module...")
+
+    // Create SQLx DB wrapper
+    sqlxDB := sqlx.NewDb(db, "postgres")
+    
+    // Create notifications repository
+    notificationsRepo := notifications.NewPostgresRepository(sqlxDB)
+
+    // Initialize notification services based on environment
+    var pushService notifications.PushService
+    var emailService notifications.EmailService
+    var smsService notifications.SMSService
+
+    // Initialize Push Service (FCM)
+    if os.Getenv("ENABLE_PUSH_NOTIFICATIONS") == "true" {
+        fcmService, err := notifications.NewFCMPushService(context.Background())
+        if err != nil {
+            log.Printf("Warning: Failed to initialize FCM push service: %v", err)
+            // Use mock service for development
+            pushService = notifications.NewMockPushService()
+        } else {
+            pushService = fcmService
+            log.Println("   ✅ FCM Push service initialized")
+        }
+    } else {
+        pushService = notifications.NewMockPushService()
+        log.Println("   📝 Using mock push service (development mode)")
+    }
+
+    // Initialize Email Service
+    if os.Getenv("ENABLE_EMAIL_NOTIFICATIONS") == "true" {
+        smtpService, err := notifications.NewSMTPEmailService()
+        if err != nil {
+            log.Printf("Warning: Failed to initialize SMTP email service: %v", err)
+            emailService = notifications.NewMockEmailService()
+        } else {
+            emailService = smtpService
+            log.Println("   ✅ SMTP Email service initialized")
+        }
+    } else {
+        emailService = notifications.NewMockEmailService()
+        log.Println("   📝 Using mock email service (development mode)")
+    }
+
+    // Initialize SMS Service
+    if os.Getenv("ENABLE_SMS_NOTIFICATIONS") == "true" {
+        twilioService, err := notifications.NewTwilioSMSService()
+        if err != nil {
+            log.Printf("Warning: Failed to initialize Twilio SMS service: %v", err)
+            smsService = notifications.NewMockSMSService()
+        } else {
+            smsService = twilioService
+            log.Println("   ✅ Twilio SMS service initialized")
+        }
+    } else {
+        smsService = notifications.NewMockSMSService()
+        log.Println("   📝 Using mock SMS service (development mode)")
+    }
+
+    // Initialize template service
+    templateService := notifications.NewTemplateService(notificationsRepo)
+
+    // Initialize default templates
+    if err := notifications.InitializeDefaultTemplates(context.Background(), notificationsRepo); err != nil {
+        log.Printf("Warning: Failed to initialize default templates: %v", err)
+    }
+
+    // Create notifications service
+    notificationsService := notifications.NewService(
+        notificationsRepo,
+        pushService,
+        emailService,
+        smsService,
+        templateService,
+    )
+
+    // Create notifications handler
+    notificationsHandler := notifications.NewHandler(notificationsService)
+
+    log.Println("✅ Notifications module initialized")
+
+    // 13. Initialize Messaging module
+    log.Println("\n💬 Step 13: Initializing Messaging module...")
+
+    // Create messaging repository
+    messagingRepo := messaging.NewPostgresRepository(sqlx.NewDb(db, "postgres"))
+
+    // Initialize AWS session for S3 (reuse existing or create new)
+    var awsSession *session.Session
+    if cfg.UseS3 {
+        awsSession, err = session.NewSession(&aws.Config{
+            Region: aws.String(cfg.S3Region),
+        })
+        if err != nil {
+            log.Printf("⚠️  Warning: AWS session creation failed for messaging: %v", err)
+        }
+    }
+
+    // Create storage service for media messages
+    var messagingStorage messaging.StorageService
+    if awsSession != nil && cfg.UseS3 {
+        messagingStorage = messaging.NewStorageService(
+            awsSession,
+            cfg.S3Bucket,        // Can reuse existing bucket or use separate one
+            cfg.BaseURL,         // CDN URL for serving media
+            52428800,            // 50MB max file size
+        )
+        log.Println("   ✅ Using S3 for message media storage")
+    } else {
+        log.Println("   ⚠️  Storage service disabled for messaging - S3 not configured")
+        // You could implement a local storage fallback here if needed
+    }
+
+    // Create push notification service
+    var pushService messaging.PushService
+    firebaseCredPath := os.Getenv("FCM_CREDENTIALS_FILE")
+    if firebaseCredPath != "" && fileExists(firebaseCredPath) {
+        pushService, err = messaging.NewPushService(
+            firebaseCredPath,
+            messagingRepo,
+        )
+        if err != nil {
+            log.Printf("   ⚠️  Warning: Push notifications disabled: %v", err)
+            pushService = messaging.NewMockPushService()
+        } else {
+            log.Println("   ✅ Firebase push notifications enabled")
+        }
+    } else {
+        log.Println("   ⚠️  Push notifications disabled - Firebase credentials not configured")
+        pushService = messaging.NewMockPushService()
+    }
+
+    // Create messaging service (without hub initially)
+    messagingService := messaging.NewService(
+        messagingRepo,
+        nil, // Hub will be set later
+        messagingStorage,
+        pushService,
+    )
+
+    // Create WebSocket hub
+    messagingHub := messaging.NewHub(messagingService)
+
+    // Set hub in service (resolve circular dependency)
+    if svc, ok := messagingService.(*messaging.Service); ok {
+        svc.SetHub(messagingHub)
+    }
+
+    // Start WebSocket hub
+    go messagingHub.Run()
+    log.Println("   ✅ WebSocket hub started")
+
+    // Start message cleanup job (for expired messages)
+    go startMessageCleanup(messagingService)
+    log.Println("   ✅ Message cleanup job started")
+
+    // Create messaging handler
+    messagingHandler := messaging.NewHandler(messagingService, messagingHub)
+
+    log.Println("✅ Messaging module initialized successfully")
+    
+    // 14. Setup routes
+    log.Println("\n🛣️  Step 14: Setting up routes...")
     router := mux.NewRouter()
     
     // Static files for uploads
@@ -249,7 +430,7 @@ func main() {
     authHandler.RegisterRoutes(router)
     log.Println("   ✅ Auth routes registered")
     
-    // Register profile routes (NEW)
+    // Register profile routes
     log.Println("   - Registering profile routes...")
     registerProfileRoutes(router, profileHandler, authMiddleware)
     log.Println("   ✅ Profile routes registered")
@@ -258,28 +439,45 @@ func main() {
     posts.RegisterRoutes(router, postsHandler, authMiddleware)
     log.Println("   ✅ Posts routes registered")
 
-    // Initialize Stories module
-    log.Println("\n📸 Initializing Stories module...")
-
-    storiesRepo := stories.NewPostgresRepository(sqlx.NewDb(db, "postgres"))
-    storiesUploadService := stories.NewUploadService(uploadConfig) // Reuse or create new
-    storiesService := stories.NewService(storiesRepo, storiesUploadService)
-    storiesHandler := stories.NewHandler(storiesService)
-
-    // Register routes
+    // Register stories routes
     stories.RegisterRoutes(router, storiesHandler, authMiddleware)
-
-    // Start cleanup job
-    cleanupService := stories.NewCleanupService(storiesService)
-    go cleanupService.Start(context.Background())
-
-    log.Println("✅ Stories module initialized")    
+    log.Println("   ✅ Stories routes registered")
     
+    // Register messaging routes
+    log.Println("   - Registering messaging routes...")
+    messaging.RegisterRoutes(router, messagingHandler, authMiddleware.Authenticate)
+    messaging.RegisterHealthCheck(router, messagingHandler)
+    log.Println("   ✅ Messaging routes registered")
+
+    // Register notifications routes (NEW)
+    log.Println("   - Registering notifications routes...")
+    notifications.RegisterRoutes(router, notificationsHandler, authMiddleware.Authenticate)
+    log.Println("   ✅ Notifications routes registered")
+
     // Add middleware
     router.Use(loggingMiddleware)
     router.Use(corsMiddleware)
+
+    // Start notification scheduler for scheduled notifications
+    scheduler := notifications.NewNotificationScheduler(notificationsService, 1*time.Minute)
+    go scheduler.Start(context.Background())
+
+    // Start cleanup job for old notifications
+    cleanupJob := notifications.NewNotificationCleanupJob(
+        notificationsService,
+        24*time.Hour,  // Run daily
+        30*24*time.Hour, // Keep notifications for 30 days
+    )
+    go cleanupJob.Start(context.Background())
+
+    // Optional: Start digest scheduler
+    if os.Getenv("ENABLE_NOTIFICATION_DIGEST") == "true" {
+        digestScheduler := notifications.NewDigestScheduler(notificationsService, "0 9 * * *")
+        go digestScheduler.Start(context.Background())
+        log.Println("   ✅ Notification digest scheduler started (9AM daily)")
+    }
     
-    // 12. Create and start HTTP server
+    // 15. Create and start HTTP server
     srv := &http.Server{
         Addr:         fmt.Sprintf(":%s", cfg.Port),
         Handler:      router,
@@ -306,7 +504,11 @@ func main() {
     
     log.Println("\n⚠️  Shutdown signal received...")
     
-    // Graceful shutdown
+    // Graceful shutdown for messaging hub
+    log.Println("   - Shutting down messaging hub...")
+    messagingHub.Shutdown()
+    
+    // Graceful server shutdown
     ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
     defer cancel()
     
@@ -365,6 +567,40 @@ func startOTPCleanup(otpService otp.Service) {
     }
 }
 
+// Message cleanup job
+func startMessageCleanup(messagingService messaging.Service) {
+    ticker := time.NewTicker(24 * time.Hour) // Run daily
+    defer ticker.Stop()
+    
+    for {
+        select {
+        case <-ticker.C:
+            ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+            
+            // Clean up expired messages (if disappearing messages are enabled)
+            if err := messagingService.CleanupExpiredMessages(ctx); err != nil {
+                log.Printf("Failed to cleanup expired messages: %v", err)
+            }
+            
+            // Clean up old message receipts (optional, for performance)
+            if err := messagingService.CleanupOldReceipts(ctx, 90*24*time.Hour); err != nil {
+                log.Printf("Failed to cleanup old receipts: %v", err)
+            }
+            
+            cancel()
+        }
+    }
+}
+
+// Check if file exists
+func fileExists(filename string) bool {
+    info, err := os.Stat(filename)
+    if os.IsNotExist(err) {
+        return false
+    }
+    return !info.IsDir()
+}
+
 // healthCheck returns server health status
 func healthCheck(w http.ResponseWriter, r *http.Request) {
     log.Printf("📥 Health check request from %s", r.RemoteAddr)
@@ -409,6 +645,43 @@ func apiInfo(w http.ResponseWriter, r *http.Request) {
                 "comment": "POST /api/v1/posts/{id}/comment",
                 "feed": "GET /api/v1/posts/feed",
                 "explore": "GET /api/v1/posts/explore"
+            },
+            "stories": {
+                "create": "POST /api/v1/stories",
+                "get": "GET /api/v1/stories/{id}",
+                "delete": "DELETE /api/v1/stories/{id}",
+                "view": "POST /api/v1/stories/{id}/view",
+                "archive": "GET /api/v1/stories/archive",
+                "feed": "GET /api/v1/stories/feed"
+            },
+            "messaging": {
+                "websocket": "GET /ws",
+                "conversations": {
+                    "list": "GET /api/v1/messages/conversations",
+                    "create": "POST /api/v1/messages/conversations",
+                    "get": "GET /api/v1/messages/conversations/{id}",
+                    "delete": "DELETE /api/v1/messages/conversations/{id}"
+                },
+                "messages": {
+                    "send": "POST /api/v1/messages/messages",
+                    "list": "GET /api/v1/messages/conversations/{id}/messages",
+                    "edit": "PUT /api/v1/messages/messages/{id}",
+                    "delete": "DELETE /api/v1/messages/messages/{id}",
+                    "markRead": "POST /api/v1/messages/messages/read"
+                },
+                "reactions": {
+                    "add": "POST /api/v1/messages/messages/{id}/reactions",
+                    "remove": "DELETE /api/v1/messages/messages/{id}/reactions/{reaction}"
+                },
+                "typing": "POST /api/v1/messages/typing",
+                "pushTokens": {
+                    "register": "POST /api/v1/messages/push-tokens",
+                    "unregister": "DELETE /api/v1/messages/push-tokens/{token}"
+                },
+                "blocking": {
+                    "block": "POST /api/v1/messages/block/{userId}",
+                    "unblock": "POST /api/v1/messages/unblock/{userId}"
+                }
             },
             "protected": {
                 "me": "GET /api/v1/me (requires auth)"
@@ -562,7 +835,7 @@ func runMigrations(db *sql.DB) error {
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )`,
         
-        // Posts tables - ADD THESE
+        // Posts tables
         `CREATE TABLE IF NOT EXISTS posts (
             id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -611,7 +884,7 @@ func runMigrations(db *sql.DB) error {
         `CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)`,
         `CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)`,
         
-        // Posts indexes - ADD THESE
+        // Posts indexes
         `CREATE INDEX IF NOT EXISTS idx_posts_user_id ON posts(user_id)`,
         `CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts(created_at DESC)`,
         `CREATE INDEX IF NOT EXISTS idx_posts_visibility ON posts(visibility)`,
@@ -634,6 +907,130 @@ func runMigrations(db *sql.DB) error {
             log.Printf("   - Migration %d skipped (already exists)", i+1)
         }
     }
+
+    // Add messaging tables
+    log.Println("   - Running messaging migrations...")
+    messagingMigrations := []string{
+        // Conversations table
+        `CREATE TABLE IF NOT EXISTS conversations (
+            id SERIAL PRIMARY KEY,
+            type VARCHAR(20) DEFAULT 'direct',
+            name VARCHAR(100),
+            avatar_url TEXT,
+            created_by INTEGER REFERENCES users(id),
+            is_active BOOLEAN DEFAULT TRUE,
+            last_message_at TIMESTAMP WITH TIME ZONE,
+            last_message_preview TEXT,
+            metadata JSONB DEFAULT '{}',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        )`,
+        
+        // Conversation participants
+        `CREATE TABLE IF NOT EXISTS conversation_participants (
+            id SERIAL PRIMARY KEY,
+            conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            role VARCHAR(20) DEFAULT 'member',
+            joined_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            left_at TIMESTAMP WITH TIME ZONE,
+            last_read_at TIMESTAMP WITH TIME ZONE,
+            last_read_message_id INTEGER,
+            is_muted BOOLEAN DEFAULT FALSE,
+            muted_until TIMESTAMP WITH TIME ZONE,
+            is_archived BOOLEAN DEFAULT FALSE,
+            notification_preference VARCHAR(20) DEFAULT 'all',
+            unread_count INTEGER DEFAULT 0,
+            is_typing BOOLEAN DEFAULT FALSE,
+            typing_started_at TIMESTAMP WITH TIME ZONE,
+            CONSTRAINT unique_conversation_participant UNIQUE(conversation_id, user_id)
+        )`,
+        
+        // Messages table
+        `CREATE TABLE IF NOT EXISTS messages (
+            id SERIAL PRIMARY KEY,
+            conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            parent_message_id INTEGER REFERENCES messages(id),
+            content TEXT,
+            message_type VARCHAR(20) DEFAULT 'text',
+            media_url TEXT,
+            media_thumbnail_url TEXT,
+            media_size INTEGER,
+            media_duration INTEGER,
+            metadata JSONB DEFAULT '{}',
+            is_edited BOOLEAN DEFAULT FALSE,
+            edited_at TIMESTAMP WITH TIME ZONE,
+            is_deleted BOOLEAN DEFAULT FALSE,
+            deleted_at TIMESTAMP WITH TIME ZONE,
+            delivered_at TIMESTAMP WITH TIME ZONE,
+            expires_at TIMESTAMP WITH TIME ZONE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        )`,
+        
+        // Message receipts
+        `CREATE TABLE IF NOT EXISTS message_receipts (
+            id SERIAL PRIMARY KEY,
+            message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            delivered_at TIMESTAMP WITH TIME ZONE,
+            read_at TIMESTAMP WITH TIME ZONE,
+            CONSTRAINT unique_message_receipt UNIQUE(message_id, user_id)
+        )`,
+        
+        // Message reactions
+        `CREATE TABLE IF NOT EXISTS message_reactions (
+            id SERIAL PRIMARY KEY,
+            message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            reaction VARCHAR(50) NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT unique_message_reaction UNIQUE(message_id, user_id, reaction)
+        )`,
+        
+        // Push tokens
+        `CREATE TABLE IF NOT EXISTS push_tokens (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            token TEXT NOT NULL UNIQUE,
+            platform VARCHAR(20) NOT NULL,
+            device_id VARCHAR(255),
+            is_active BOOLEAN DEFAULT TRUE,
+            last_used_at TIMESTAMP WITH TIME ZONE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        )`,
+        
+        // Blocked conversations
+        `CREATE TABLE IF NOT EXISTS blocked_conversations (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            blocked_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            blocked_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT unique_blocked_conversation UNIQUE(user_id, blocked_user_id)
+        )`,
+        
+        // Indexes for messaging
+        `CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC)`,
+        `CREATE INDEX IF NOT EXISTS idx_conversations_last_message ON conversations(last_message_at DESC)`,
+        `CREATE INDEX IF NOT EXISTS idx_participants_conversation ON conversation_participants(conversation_id)`,
+        `CREATE INDEX IF NOT EXISTS idx_participants_user ON conversation_participants(user_id)`,
+        `CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at DESC)`,
+        `CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id)`,
+        `CREATE INDEX IF NOT EXISTS idx_receipts_message ON message_receipts(message_id)`,
+        `CREATE INDEX IF NOT EXISTS idx_push_tokens_user ON push_tokens(user_id)`,
+    }
+    
+    // Run messaging migrations
+    for i, migration := range messagingMigrations {
+        log.Printf("   - Running messaging migration %d/%d...", i+1, len(messagingMigrations))
+        if _, err := db.Exec(migration); err != nil {
+            if !contains(err.Error(), "already exists") {
+                return fmt.Errorf("messaging migration %d failed: %w", i+1, err)
+            }
+            log.Printf("   - Messaging migration %d skipped (already exists)", i+1)
+        }
+    }
     
     log.Println("   ✅ All migrations executed successfully")
     return nil
@@ -641,7 +1038,7 @@ func runMigrations(db *sql.DB) error {
 
 // Helper function
 func contains(s, substr string) bool {
-    return len(s) > 0 && len(substr) > 0 && (s == substr || len(s) > len(substr) && (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr || len(substr) < len(s) && containsMiddle(s, substr)))
+    return len(s) > 0 && len(substr) > 0 && (s == substr || len(s) > len(substr) && (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr || len(substr) < len(s) && containsMiddle(s, substr))
 }
 
 func containsMiddle(s, substr string) bool {
