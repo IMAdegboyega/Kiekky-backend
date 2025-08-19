@@ -6,7 +6,6 @@ import (
     "bytes"
     "context"
     "fmt"
-    "strings"
     "text/template"
 )
 
@@ -148,11 +147,11 @@ func (s *DefaultTemplateService) getStringValue(data map[string]interface{}, key
 }
 
 // truncate truncates a string to specified length
-func (s *DefaultTemplateService) truncate(s string, maxLen int) string {
-    if len(s) <= maxLen {
-        return s
+func (s *DefaultTemplateService) truncate(temp string, maxLen int) string {
+    if len(temp) <= maxLen {
+        return temp
     }
-    return s[:maxLen-3] + "..."
+    return temp[:maxLen-3] + "..."
 }
 
 // Default notification templates for different languages

@@ -9,9 +9,7 @@ import (
     "fmt"
     "html/template"
     "log"
-    "net/smtp"
     "os"
-    "strings"
     
     "gopkg.in/gomail.v2"
 )

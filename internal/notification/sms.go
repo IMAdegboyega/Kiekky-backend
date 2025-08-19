@@ -4,7 +4,6 @@ package notifications
 
 import (
     "context"
-    "encoding/json"
     "fmt"
     "log"
     "os"
