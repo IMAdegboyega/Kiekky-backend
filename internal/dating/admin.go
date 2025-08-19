@@ -1,3 +1,5 @@
+// internal/dating/admin.go
+
 package dating
 
 import (
@@ -50,7 +52,7 @@ func (a *AdminService) GetDatingStats(ctx context.Context) (*DatingStats, error)
             COUNT(CASE WHEN last_active > NOW() - INTERVAL '1 day' THEN 1 END) as daily_active
         FROM users
     `
-    err := a.repo.db.QueryRowContext(ctx, userQuery).Scan(
+    err := a.repo.GetDB().QueryRowContext(ctx, userQuery).Scan(
         &stats.TotalUsers,
         &stats.ActiveUsers,
         &stats.DailyActiveUsers,
@@ -67,7 +69,7 @@ func (a *AdminService) GetDatingStats(ctx context.Context) (*DatingStats, error)
             NULLIF(COUNT(CASE WHEN status IN ('accepted', 'declined') THEN 1 END), 0) as acceptance_rate
         FROM date_requests
     `
-    err = a.repo.db.QueryRowContext(ctx, requestQuery).Scan(
+    err = a.repo.GetDB().QueryRowContext(ctx, requestQuery).Scan(
         &stats.TotalDateRequests,
         &stats.AcceptanceRate,
     )
@@ -83,7 +85,7 @@ func (a *AdminService) GetDatingStats(ctx context.Context) (*DatingStats, error)
             AVG(compatibility_score) as avg_compatibility
         FROM matches
     `
-    err = a.repo.db.QueryRowContext(ctx, matchQuery).Scan(
+    err = a.repo.GetDB().QueryRowContext(ctx, matchQuery).Scan(
         &stats.TotalMatches,
         &stats.ActiveMatches,
         &stats.AverageCompatibility,
@@ -100,7 +102,7 @@ func (a *AdminService) GetDatingStats(ctx context.Context) (*DatingStats, error)
         FROM hotpicks
         WHERE created_at > NOW() - INTERVAL '7 days'
     `
-    err = a.repo.db.GetContext(ctx, &stats.HotpicksEngagementRate, hotpicksQuery)
+    err = a.repo.GetDB().GetContext(ctx, &stats.HotpicksEngagementRate, hotpicksQuery)
     if err != nil {
         return nil, err
     }
@@ -124,7 +126,7 @@ func (a *AdminService) ReviewReportedUsers(ctx context.Context) ([]*ReportedUser
         ORDER BY COUNT(r.id) DESC
     `
     
-    rows, err := a.repo.db.QueryxContext(ctx, query)
+    rows, err := a.repo.GetDB().QueryxContext(ctx, query)
     if err != nil {
         return nil, err
     }

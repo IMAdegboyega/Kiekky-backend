@@ -1,3 +1,5 @@
+// internal/notification/models.go
+
 package notifications
 
 import (

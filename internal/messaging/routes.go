@@ -26,7 +26,6 @@ func RegisterRoutes(router *mux.Router, handler *Handler, authMiddleware AuthMid
     })
     
     // Conversation endpoints
-    api.HandleFunc("/conversations", handler.CreateConversation).Methods("POST")
     api.HandleFunc("/conversations", handler.GetConversations).Methods("GET")
     api.HandleFunc("/conversations/{id:[0-9]+}", handler.GetConversation).Methods("GET")
     api.HandleFunc("/conversations/{id:[0-9]+}", handler.UpdateConversation).Methods("PUT", "PATCH")
@@ -83,4 +82,4 @@ func RegisterRoutes(router *mux.Router, handler *Handler, authMiddleware AuthMid
 // HealthCheck endpoint for the messaging service
 func RegisterHealthCheck(router *mux.Router, handler *Handler) {
     router.HandleFunc("/health/messaging", handler.HealthCheck).Methods("GET")
-}
+} 

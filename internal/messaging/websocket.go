@@ -4,12 +4,10 @@ package messaging
 
 import (
     "encoding/json"
-    "log"
-    "net/http"
     "time"
     
     "github.com/gorilla/websocket"
-)
+) 
 
 // WebSocket configuration constants
 const (
@@ -28,17 +26,6 @@ const (
     // Maximum number of queued messages per client
     maxQueuedMessages = 256
 )
-
-// Upgrader for WebSocket connections
-var upgrader = websocket.Upgrader{
-    ReadBufferSize:  1024,
-    WriteBufferSize: 1024,
-    CheckOrigin: func(r *http.Request) bool {
-        // In production, implement proper CORS checking
-        // For now, accept all origins
-        return true
-    },
-}
 
 // WSError represents a WebSocket error message
 type WSError struct {
@@ -89,16 +76,6 @@ func SendWSError(conn *websocket.Conn, msgType string, err error) error {
     
     conn.SetWriteDeadline(time.Now().Add(writeWait))
     return conn.WriteJSON(response)
-}
-
-// mustMarshal marshals data to JSON, panics on error
-func mustMarshal(v interface{}) json.RawMessage {
-    data, err := json.Marshal(v)
-    if err != nil {
-        log.Printf("Failed to marshal data: %v", err)
-        return json.RawMessage(`{}`)
-    }
-    return data
 }
 
 // WSAuth represents WebSocket authentication data

@@ -1,3 +1,5 @@
+// internal/notification/email.go
+
 package notifications
 
 import (

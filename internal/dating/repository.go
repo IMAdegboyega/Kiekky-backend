@@ -1,9 +1,13 @@
+// internal/dating/repository.go
+
 package dating
 
 import (
     "context"
     "database/sql"
     "encoding/json"
+    "errors"
+    "fmt"
     "time"
     
     "github.com/jmoiron/sqlx"
@@ -41,6 +45,9 @@ type Repository interface {
     GetUserReportCount(ctx context.Context, userID int64, days int) (int, error)
     GetRecentRequestCount(ctx context.Context, userID int64, duration time.Duration) (int, error)
     GetDeclineCount(ctx context.Context, senderID, receiverID int64) (int, error)
+
+    // FIXED: Add GetDB method to expose database connection when needed
+    GetDB() *sqlx.DB
 }
 
 type postgresRepository struct {
@@ -49,6 +56,10 @@ type postgresRepository struct {
 
 func NewPostgresRepository(db *sqlx.DB) Repository {
     return &postgresRepository{db: db}
+}
+
+func (r *postgresRepository) GetDB() *sqlx.DB {
+    return r.db
 }
 
 // Date Request Methods
@@ -165,6 +176,25 @@ func (r *postgresRepository) GetUserDateRequests(ctx context.Context, userID int
     return requests, nil
 }
 
+func (r *postgresRepository) GetUpcomingDates(ctx context.Context, userID int64) ([]*DateRequest, error) {
+    query := `
+        SELECT dr.*,
+               u1.username as sender_username, u1.display_name as sender_name,
+               u2.username as receiver_username, u2.display_name as receiver_name
+        FROM date_requests dr
+        JOIN users u1 ON dr.sender_id = u1.id
+        JOIN users u2 ON dr.receiver_id = u2.id
+        WHERE (dr.sender_id = $1 OR dr.receiver_id = $1)
+        AND dr.status = 'accepted'
+        AND dr.proposed_date > NOW()
+        ORDER BY dr.proposed_date ASC
+    `
+    
+    var dates []*DateRequest
+    err := r.db.SelectContext(ctx, &dates, query, userID)
+    return dates, err
+}
+
 func (r *postgresRepository) HasPendingRequest(ctx context.Context, senderID, receiverID int64) (bool, error) {
     var exists bool
     query := `
@@ -176,6 +206,21 @@ func (r *postgresRepository) HasPendingRequest(ctx context.Context, senderID, re
     
     err := r.db.GetContext(ctx, &exists, query, senderID, receiverID)
     return exists, err
+}
+
+func (r *postgresRepository) UpdateHotpick(ctx context.Context, hotpick *Hotpick) error {
+    query := `
+        UPDATE hotpicks
+        SET is_seen = $2, is_acted_on = $3, action_type = $4
+        WHERE id = $1
+    `
+    
+    _, err := r.db.ExecContext(
+        ctx, query,
+        hotpick.ID, hotpick.IsSeen, hotpick.IsActedOn, hotpick.ActionType,
+    )
+    
+    return err
 }
 
 // Match Methods
@@ -205,6 +250,18 @@ func (r *postgresRepository) CreateMatch(ctx context.Context, match *Match) erro
     ).Scan(&match.ID, &match.MatchedAt)
     
     return err
+}
+
+func (r *postgresRepository) GetMatch(ctx context.Context, id int64) (*Match, error) {
+    var match Match
+    query := `
+        SELECT * FROM matches WHERE id = $1
+    `
+    err := r.db.GetContext(ctx, &match, query, id)
+    if err == sql.ErrNoRows {
+        return nil, errors.New("match not found")
+    }
+    return &match, err
 }
 
 func (r *postgresRepository) GetUserMatches(ctx context.Context, userID int64, active bool) ([]*Match, error) {
@@ -264,6 +321,23 @@ func (r *postgresRepository) GetUserMatches(ctx context.Context, userID int64, a
     return matches, nil
 }
 
+func (r *postgresRepository) UpdateMatch(ctx context.Context, match *Match) error {
+    query := `
+        UPDATE matches
+        SET is_active = $2, unmatched_by = $3, unmatched_at = $4,
+            interaction_count = $5, last_interaction = $6
+        WHERE id = $1
+    `
+    
+    _, err := r.db.ExecContext(
+        ctx, query,
+        match.ID, match.IsActive, match.UnmatchedBy,
+        match.UnmatchedAt, match.InteractionCount, match.LastInteraction,
+    )
+    
+    return err
+}
+
 func (r *postgresRepository) IsMatched(ctx context.Context, user1ID, user2ID int64) (bool, error) {
     // Ensure consistent ordering
     if user1ID > user2ID {
@@ -303,6 +377,37 @@ func (r *postgresRepository) CreateHotpick(ctx context.Context, hotpick *Hotpick
     ).Scan(&hotpick.ID, &hotpick.CreatedAt)
     
     return err
+}
+
+func (r *postgresRepository) HasTodayHotpicks(ctx context.Context, userID int64) (bool, error) {
+    var exists bool
+    query := `
+        SELECT EXISTS(
+            SELECT 1 FROM hotpicks
+            WHERE user_id = $1 AND DATE(created_at) = CURRENT_DATE
+        )
+    `
+    
+    err := r.db.GetContext(ctx, &exists, query, userID)
+    return exists, err
+}
+
+func (r *postgresRepository) GetUserProfile(ctx context.Context, userID int64) (*UserProfile, error) {
+    var profile UserProfile
+    query := `
+        SELECT id, username, display_name, bio, birth_date, gender,
+               profile_picture, location_lat, location_lng, interests,
+               looking_for, last_active, is_verified, created_at
+        FROM users
+        WHERE id = $1
+    `
+    
+    err := r.db.GetContext(ctx, &profile, query, userID)
+    if err == sql.ErrNoRows {
+        return nil, errors.New("user profile not found")
+    }
+    
+    return &profile, err
 }
 
 func (r *postgresRepository) GetUserHotpicks(ctx context.Context, userID int64, limit int, excludeViewed bool) ([]*Hotpick, error) {
@@ -365,4 +470,110 @@ func (r *postgresRepository) DeleteExpiredHotpicks(ctx context.Context) error {
     
     _, err := r.db.ExecContext(ctx, query)
     return err
+}
+
+func (r *postgresRepository) GetActiveUsers(ctx context.Context, daysActive int) ([]*UserProfile, error) {
+    var users []*UserProfile
+    query := `
+        SELECT id, username, display_name, bio, birth_date, gender,
+               profile_picture, location_lat, location_lng, interests,
+               looking_for, last_active, is_verified, created_at
+        FROM users
+        WHERE last_active > NOW() - INTERVAL '%d days'
+        AND is_profile_complete = TRUE
+    `
+    
+    err := r.db.SelectContext(ctx, &users, fmt.Sprintf(query, daysActive))
+    return users, err
+}
+
+func (r *postgresRepository) FindCandidates(ctx context.Context, userID int64, filters *CandidateFilters) ([]*UserProfile, error) {
+    // Implementation would include complex filtering logic
+    var candidates []*UserProfile
+    
+    query := `
+        SELECT DISTINCT u.id, u.username, u.display_name, u.bio, u.birth_date, 
+               u.gender, u.profile_picture, u.location_lat, u.location_lng, 
+               u.interests, u.looking_for, u.last_active, u.is_verified, u.created_at
+        FROM users u
+        WHERE u.id != $1
+        AND u.is_profile_complete = TRUE
+    `
+    
+    args := []interface{}{userID}
+    argCount := 1
+    
+    if filters.Gender != "" {
+        argCount++
+        query += fmt.Sprintf(" AND u.gender = $%d", argCount)
+        args = append(args, filters.Gender)
+    }
+    
+    if filters.MinAge > 0 {
+        argCount++
+        query += fmt.Sprintf(" AND EXTRACT(YEAR FROM AGE(u.birth_date)) >= $%d", argCount)
+        args = append(args, filters.MinAge)
+    }
+    
+    if filters.MaxAge > 0 {
+        argCount++
+        query += fmt.Sprintf(" AND EXTRACT(YEAR FROM AGE(u.birth_date)) <= $%d", argCount)
+        args = append(args, filters.MaxAge)
+    }
+    
+    if filters.ExcludeMatched {
+        query += `
+            AND u.id NOT IN (
+                SELECT CASE 
+                    WHEN user1_id = $1 THEN user2_id 
+                    ELSE user1_id 
+                END
+                FROM matches 
+                WHERE (user1_id = $1 OR user2_id = $1) AND is_active = TRUE
+            )
+        `
+    }
+    
+    if filters.Limit > 0 {
+        query += fmt.Sprintf(" LIMIT %d", filters.Limit)
+    }
+    
+    err := r.db.SelectContext(ctx, &candidates, query, args...)
+    return candidates, err
+}
+
+func (r *postgresRepository) GetUserReportCount(ctx context.Context, userID int64, days int) (int, error) {
+    var count int
+    query := `
+        SELECT COUNT(*) FROM user_reports
+        WHERE reported_user_id = $1 
+        AND created_at > NOW() - INTERVAL '%d days'
+    `
+    
+    err := r.db.GetContext(ctx, &count, fmt.Sprintf(query, days), userID)
+    return count, err
+}
+
+func (r *postgresRepository) GetRecentRequestCount(ctx context.Context, userID int64, duration time.Duration) (int, error) {
+    var count int
+    query := `
+        SELECT COUNT(*) FROM date_requests
+        WHERE sender_id = $1 
+        AND created_at > $2
+    `
+    
+    err := r.db.GetContext(ctx, &count, query, userID, time.Now().Add(-duration))
+    return count, err
+}
+
+func (r *postgresRepository) GetDeclineCount(ctx context.Context, senderID, receiverID int64) (int, error) {
+    var count int
+    query := `
+        SELECT COUNT(*) FROM date_requests
+        WHERE sender_id = $1 AND receiver_id = $2 
+        AND status = 'declined'
+    `
+    
+    err := r.db.GetContext(ctx, &count, query, senderID, receiverID)
+    return count, err
 }

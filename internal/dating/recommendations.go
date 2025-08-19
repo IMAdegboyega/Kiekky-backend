@@ -1,3 +1,5 @@
+// internal/dating/recommendations.go
+
 package dating
 
 import (
@@ -79,10 +81,10 @@ func (r *RecommendationEngine) findCandidates(ctx context.Context, userID int64,
         ExcludeMatched:    true,
         ExcludeBlocked:    true,
         ExcludeDeclined:   true,
-        Gender:            profile.PreferredGender,
-        MinAge:            profile.PreferredMinAge,
-        MaxAge:            profile.PreferredMaxAge,
-        MaxDistance:       profile.PreferredDistance,
+        Gender:            derefString(profile.PreferredGender, ""),
+        MinAge:            derefInt(profile.PreferredMinAge, 18),
+        MaxAge:            derefInt(profile.PreferredMaxAge, 100),
+        MaxDistance:       derefFloat64(profile.PreferredDistance, 100.0),
         Limit:             100,
     }
     
@@ -196,4 +198,26 @@ func min(a, b float64) float64 {
         return a
     }
     return b
+}
+
+// Helper functions for dereferencing pointers with defaults
+func derefString(s *string, defaultValue string) string {
+    if s != nil {
+        return *s
+    }
+    return defaultValue
+}
+
+func derefInt(i *int, defaultValue int) int {
+    if i != nil {
+        return *i
+    }
+    return defaultValue
+}
+
+func derefFloat64(f *float64, defaultValue float64) float64 {
+    if f != nil {
+        return *f
+    }
+    return defaultValue
 }

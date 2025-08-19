@@ -30,6 +30,7 @@ import (
     "github.com/imadgeboyega/kiekky-backend/internal/stories"
     "github.com/imadgeboyega/kiekky-backend/internal/posts"
     "github.com/imadgeboyega/kiekky-backend/internal/messaging"
+    "github.com/imadgeboyega/kiekky-backend/internal/notifications"
     "github.com/imadgeboyega/kiekky-backend/internal/common/database"
     "github.com/imadgeboyega/kiekky-backend/internal/config"
 )
@@ -236,7 +237,17 @@ func main() {
     log.Println("\n📸 Step 11: Initializing Stories module...")
 
     storiesRepo := stories.NewPostgresRepository(sqlx.NewDb(db, "postgres"))
-    storiesUploadService := stories.NewUploadService(uploadConfig)
+    
+    // FIXED: Create stories-specific upload config
+    storiesUploadConfig := stories.UploadConfig{
+        UseS3:          cfg.UseS3,
+        S3Bucket:       cfg.S3Bucket,
+        AWSRegion:      cfg.S3Region,
+        LocalUploadDir: cfg.LocalUploadDir,
+        BaseURL:        cfg.BaseURL,
+    }
+    
+    storiesUploadService := stories.NewUploadService(storiesUploadConfig)
     storiesService := stories.NewService(storiesRepo, storiesUploadService)
     storiesHandler := stories.NewHandler(storiesService)
 
@@ -258,9 +269,9 @@ func main() {
     notificationsRepo := notifications.NewPostgresRepository(sqlxDB)
 
     // Initialize notification services based on environment
-    var pushService notifications.PushService
-    var emailService notifications.EmailService
-    var smsService notifications.SMSService
+    var notifPushService notifications.PushService // FIXED: Renamed to avoid conflict
+    var notifEmailService notifications.EmailService // FIXED: Renamed for clarity
+    var notifSmsService notifications.SMSService // FIXED: Renamed for clarity
 
     // Initialize Push Service (FCM)
     if os.Getenv("ENABLE_PUSH_NOTIFICATIONS") == "true" {
@@ -268,13 +279,13 @@ func main() {
         if err != nil {
             log.Printf("Warning: Failed to initialize FCM push service: %v", err)
             // Use mock service for development
-            pushService = notifications.NewMockPushService()
+            notifPushService = notifications.NewMockPushService()
         } else {
-            pushService = fcmService
+            notifPushService = fcmService
             log.Println("   ✅ FCM Push service initialized")
         }
     } else {
-        pushService = notifications.NewMockPushService()
+        notifPushService = notifications.NewMockPushService()
         log.Println("   📝 Using mock push service (development mode)")
     }
 
@@ -283,13 +294,13 @@ func main() {
         smtpService, err := notifications.NewSMTPEmailService()
         if err != nil {
             log.Printf("Warning: Failed to initialize SMTP email service: %v", err)
-            emailService = notifications.NewMockEmailService()
+            notifEmailService = notifications.NewMockEmailService()
         } else {
-            emailService = smtpService
+            notifEmailService = smtpService
             log.Println("   ✅ SMTP Email service initialized")
         }
     } else {
-        emailService = notifications.NewMockEmailService()
+        notifEmailService = notifications.NewMockEmailService()
         log.Println("   📝 Using mock email service (development mode)")
     }
 
@@ -298,13 +309,13 @@ func main() {
         twilioService, err := notifications.NewTwilioSMSService()
         if err != nil {
             log.Printf("Warning: Failed to initialize Twilio SMS service: %v", err)
-            smsService = notifications.NewMockSMSService()
+            notifSmsService = notifications.NewMockSMSService()
         } else {
-            smsService = twilioService
+            notifSmsService = twilioService
             log.Println("   ✅ Twilio SMS service initialized")
         }
     } else {
-        smsService = notifications.NewMockSMSService()
+        notifSmsService = notifications.NewMockSMSService()
         log.Println("   📝 Using mock SMS service (development mode)")
     }
 
@@ -319,9 +330,9 @@ func main() {
     // Create notifications service
     notificationsService := notifications.NewService(
         notificationsRepo,
-        pushService,
-        emailService,
-        smsService,
+        notifPushService,
+        notifEmailService,
+        notifSmsService,
         templateService,
     )
 
@@ -362,35 +373,34 @@ func main() {
         // You could implement a local storage fallback here if needed
     }
 
-    // Create push notification service
-    var pushService messaging.PushService
+    // Create push notification service for messaging
+    var messagingPushService messaging.PushService // FIXED: Renamed to avoid conflict
     firebaseCredPath := os.Getenv("FCM_CREDENTIALS_FILE")
     if firebaseCredPath != "" && fileExists(firebaseCredPath) {
-        pushService, err = messaging.NewPushService(
+        messagingPushService, err = messaging.NewPushService(
             firebaseCredPath,
             messagingRepo,
         )
         if err != nil {
             log.Printf("   ⚠️  Warning: Push notifications disabled: %v", err)
-            pushService = messaging.NewMockPushService()
+            messagingPushService = messaging.NewMockPushService()
         } else {
             log.Println("   ✅ Firebase push notifications enabled")
         }
     } else {
         log.Println("   ⚠️  Push notifications disabled - Firebase credentials not configured")
-        pushService = messaging.NewMockPushService()
+        messagingPushService = messaging.NewMockPushService()
     }
 
-    // Create messaging service (without hub initially)
+    // Create messaging service
     messagingService := messaging.NewService(
         messagingRepo,
-        nil, // Hub will be set later
         messagingStorage,
-        pushService,
+        messagingPushService,
     )
 
     // Create WebSocket hub
-    messagingHub := messaging.NewHub(messagingService)
+    messagingService.SetHub(messagingHub)
 
     // Set hub in service (resolve circular dependency)
     if svc, ok := messagingService.(*messaging.Service); ok {
@@ -690,7 +700,8 @@ func apiInfo(w http.ResponseWriter, r *http.Request) {
     }`))
 }
 
-// getCurrentUser is an example protected endpoint
+// getCurrentUser is an example protected endpoint 
+
 func getCurrentUser(authService auth.Service) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
         log.Printf("📥 Get current user request from %s", r.RemoteAddr)

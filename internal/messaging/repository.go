@@ -62,6 +62,10 @@ type Repository interface {
     GetUserContacts(ctx context.Context, userID int64) ([]int64, error)
     UpdateUserOnlineStatus(ctx context.Context, userID int64, isOnline bool, lastSeen time.Time) error
     GetTypingUsers(ctx context.Context, conversationID int64) ([]int64, error)
+
+    // Cleanup methods
+    DeleteExpiredMessages(ctx context.Context) error
+    DeleteOldReceipts(ctx context.Context, age time.Duration) error
 }
 
 // PushToken represents a device push notification token

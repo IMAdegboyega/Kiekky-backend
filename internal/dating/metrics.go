@@ -1,3 +1,5 @@
+// internal/dating/metrics.go
+
 package dating
 
 import (
@@ -84,7 +86,7 @@ func (m *MetricsService) CollectMetrics(ctx context.Context) (*Metrics, error) {
         WHERE created_at > NOW() - INTERVAL '30 days'
     `
     
-    err := m.repo.db.QueryRowContext(ctx, query).Scan(
+    err := m.repo.GetDB().QueryRowContext(ctx, query).Scan(
         &metrics.DateRequestsSent,
         &metrics.DateRequestsAccepted,
         &metrics.DateRequestsDeclined,

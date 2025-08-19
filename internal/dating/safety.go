@@ -1,3 +1,5 @@
+// internal/dating/safety.go
+
 package dating
 
 import (

@@ -1,3 +1,5 @@
+// internal/notification/templates.go
+
 package notifications
 
 import (

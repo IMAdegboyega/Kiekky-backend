@@ -7,6 +7,10 @@ import (
     "errors"
     "fmt"
     "time"
+    "log"
+    "io"
+    "mime/multipart"
+
 )
 
 var (
@@ -58,17 +62,44 @@ type Service interface {
     // Utilities
     GetUserContacts(ctx context.Context, userID int64) ([]int64, error)
     GetOrCreateDirectConversation(ctx context.Context, user1ID, user2ID int64) (*Conversation, error)
+
+    // Hub management
+    SetHub(hub *Hub)
+    
+    // Missing cleanup methods
+    CleanupExpiredMessages(ctx context.Context) error
+    CleanupOldReceipts(ctx context.Context, age time.Duration) error
+    
+    // Missing methods called by handlers
+    GetPendingMessages(ctx context.Context, userID int64) ([]*Message, error)
+    GetPushTokens(ctx context.Context, userID int64) ([]*PushToken, error)
+    SendPushNotification(ctx context.Context, tokens []*PushToken, message WSMessage) error
+    DeleteConversation(ctx context.Context, userID, conversationID int64) error
+    AddParticipant(ctx context.Context, conversationID, userID int64) error
+    RemoveParticipant(ctx context.Context, userID, conversationID, targetUserID int64) error
+    MuteConversation(ctx context.Context, userID, conversationID int64) error
+    UnmuteConversation(ctx context.Context, userID, conversationID int64) error
+    ArchiveConversation(ctx context.Context, userID, conversationID int64) error
+    UnarchiveConversation(ctx context.Context, userID, conversationID int64) error
+    GetReactions(ctx context.Context, messageID int64) ([]*Reaction, error)
+    UnregisterPushToken(ctx context.Context, token string) error
+    SearchMessages(ctx context.Context, userID int64, query string) ([]*Message, error)
+    GetBlockedUsers(ctx context.Context, userID int64) ([]*UserInfo, error)
+    UploadMedia(ctx context.Context, userID int64, file io.Reader, header *multipart.FileHeader) (string, error)
+    GetContactsOnlineStatus(ctx context.Context, userID int64) (map[int64]bool, error)
 }
 
-type service struct {
+// Update service struct to export it:
+type MessageService struct { // Changed from 'service' to 'MessageService' and exported
     repo           Repository
     hub            *Hub
     storageService StorageService
     pushService    PushService
 }
 
-func NewService(repo Repository, storageService StorageService, pushService PushService) Service {
-    return &service{
+// Update NewService to return concrete type for type assertion:
+func NewService(repo Repository, storageService StorageService, pushService PushService) *MessageService {
+    return &MessageService{
         repo:           repo,
         storageService: storageService,
         pushService:    pushService,
@@ -76,12 +107,12 @@ func NewService(repo Repository, storageService StorageService, pushService Push
 }
 
 // SetHub sets the hub after initialization to avoid circular dependency
-func (s *service) SetHub(hub *Hub) {
+func (s *MessageService) SetHub(hub *Hub) {
     s.hub = hub
 }
 
 // SendMessage sends a new message
-func (s *service) SendMessage(ctx context.Context, userID int64, req *SendMessageRequest) (*Message, error) {
+func (s *MessageService) SendMessage(ctx context.Context, userID int64, req *SendMessageRequest) (*Message, error) {
     // Verify user is participant
     if !s.IsUserInConversation(ctx, userID, req.ConversationID) {
         return nil, ErrNotParticipant
@@ -151,4 +182,176 @@ func (s *service) SendMessage(ctx context.Context, userID int64, req *SendMessag
     return message, nil
 }
 
-// Additional implementation methods...
+func (s *MessageService) IsUserInConversation(ctx context.Context, userID, conversationID int64) bool {
+    isIn, err := s.repo.IsUserInConversation(ctx, userID, conversationID)
+    if err != nil {
+        return false
+    }
+    return isIn
+}
+
+func (s *MessageService) IsBlocked(ctx context.Context, userID, targetUserID int64) bool {
+    blocked, err := s.repo.IsBlocked(ctx, userID, targetUserID)
+    if err != nil {
+        return false
+    }
+    return blocked
+}
+
+func (s *MessageService) sendMessageNotifications(ctx context.Context, message *Message, participants []*Participant) {
+    // Skip if no push service
+    if s.pushService == nil {
+        return
+    }
+    
+    // Get sender info
+    sender, _ := s.repo.GetUserInfo(ctx, message.SenderID)
+    if sender == nil {
+        return
+    }
+    
+    // Prepare notification
+    title := sender.DisplayName
+    body := message.Content
+    if body == nil || *body == "" {
+        switch message.MessageType {
+        case "image":
+            body = ptr("Sent an image")
+        case "video":
+            body = ptr("Sent a video")
+        case "audio":
+            body = ptr("Sent an audio message")
+        case "file":
+            body = ptr("Sent a file")
+        default:
+            body = ptr("Sent a message")
+        }
+    }
+    
+    notification := &PushNotification{
+        Title: title,
+        Body:  *body,
+        Data: map[string]string{
+            "type":            "message",
+            "conversation_id": fmt.Sprintf("%d", message.ConversationID),
+            "message_id":      fmt.Sprintf("%d", message.ID),
+            "sender_id":       fmt.Sprintf("%d", message.SenderID),
+        },
+    }
+    
+    // Send to offline participants
+    for _, participant := range participants {
+        if participant.UserID == message.SenderID {
+            continue
+        }
+        
+        // Check if user is online
+        if s.hub != nil && s.hub.IsUserOnline(participant.UserID) {
+            continue
+        }
+        
+        // Send push notification
+        go s.pushService.SendNotification(ctx, participant.UserID, notification)
+    }
+}
+
+func (s *MessageService) CleanupExpiredMessages(ctx context.Context) error {
+    // Delete messages that have expired (for disappearing messages feature)
+    query := `
+        DELETE FROM messages 
+        WHERE expires_at IS NOT NULL 
+        AND expires_at < NOW()
+    `
+    _, err := s.repo.(*postgresRepository).db.ExecContext(ctx, query)
+    return err
+}
+
+func (s *MessageService) CleanupOldReceipts(ctx context.Context, age time.Duration) error {
+    // Delete old read receipts for performance
+    query := `
+        DELETE FROM message_receipts 
+        WHERE created_at < $1
+    `
+    _, err := s.repo.(*postgresRepository).db.ExecContext(ctx, query, time.Now().Add(-age))
+    return err
+}
+
+func (s *MessageService) GetPendingMessages(ctx context.Context, userID int64) ([]*Message, error) {
+    // Get undelivered messages for a user
+    return s.repo.GetUndeliveredMessages(ctx, userID)
+}
+
+func (s *MessageService) MarkMessageDelivered(ctx context.Context, messageID int64) error {
+    // Get message to find recipients
+    message, err := s.repo.GetMessage(ctx, messageID)
+    if err != nil {
+        return err
+    }
+    
+    // Get conversation participants
+    participants, err := s.repo.GetConversationParticipants(ctx, message.ConversationID)
+    if err != nil {
+        return err
+    }
+    
+    // Mark delivered for all participants except sender
+    for _, p := range participants {
+        if p.UserID != message.SenderID {
+            s.repo.MarkMessageDelivered(ctx, messageID, p.UserID)
+        }
+    }
+    
+    return nil
+}
+
+func (s *MessageService) GetPushTokens(ctx context.Context, userID int64) ([]*PushToken, error) {
+    return s.repo.GetUserPushTokens(ctx, userID)
+}
+
+func (s *MessageService) SendPushNotification(ctx context.Context, tokens []*PushToken, message WSMessage) error {
+    // Convert WSMessage to notification format
+    var title, body string
+    
+    // Parse message data
+    switch message.Type {
+    case "message":
+        title = "New Message"
+        body = "You have a new message"
+    case "typing":
+        return nil // Don't send push for typing
+    default:
+        title = "Notification"
+        body = "You have a new notification"
+    }
+    
+    notification := &PushNotification{
+        Title: title,
+        Body:  body,
+        Data: map[string]string{
+            "type": message.Type,
+        },
+    }
+    
+    // Send to each token
+    for _, token := range tokens {
+        if err := s.pushService.SendNotification(ctx, token.UserID, notification); err != nil {
+            log.Printf("Failed to send push notification: %v", err)
+        }
+    }
+    
+    return nil
+}
+
+func (s *MessageService) GetUserContacts(ctx context.Context, userID int64) ([]int64, error) {
+    return s.repo.GetUserContacts(ctx, userID)
+}
+
+func (s *MessageService) UpdateOnlineStatus(ctx context.Context, userID int64, isOnline bool) error {
+    lastSeen := time.Now()
+    return s.repo.UpdateUserOnlineStatus(ctx, userID, isOnline, lastSeen)
+}
+
+// Helper function
+func ptr(s string) *string {
+    return &s
+}

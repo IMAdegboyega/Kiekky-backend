@@ -11,6 +11,7 @@ import (
     "path/filepath"
     "strings"
     "time"
+    "net/http"
     
     "github.com/aws/aws-sdk-go/aws"
     "github.com/aws/aws-sdk-go/aws/session"

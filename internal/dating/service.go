@@ -1,3 +1,5 @@
+// internal/dating/service.go
+
 package dating
 
 import (
@@ -49,6 +51,61 @@ type service struct {
     matchingEngine  MatchingEngine
     profileService  interface{}
     notifyService   interface{}
+}
+
+func NewService(repo Repository, matchingEngine MatchingEngine, profileService interface{}, notifyService interface{}) Service {
+    return &service{
+        repo:           repo,
+        matchingEngine: matchingEngine,
+        profileService: profileService,
+        notifyService:  notifyService,
+    }
+}
+
+func (s *service) GetDateRequests(ctx context.Context, userID int64, requestType string) ([]*DateRequest, error) {
+    return s.repo.GetUserDateRequests(ctx, userID, requestType)
+}
+
+func (s *service) GetMatches(ctx context.Context, userID int64, active bool) ([]*Match, error) {
+    return s.repo.GetUserMatches(ctx, userID, active)
+}
+
+func (s *service) IsMatched(ctx context.Context, user1ID, user2ID int64) (bool, error) {
+    return s.repo.IsMatched(ctx, user1ID, user2ID)
+}
+
+func (s *service) GenerateHotpicks(ctx context.Context, userID int64) error {
+    engine := NewRecommendationEngine(s, s.matchingEngine, s.repo)
+    return engine.GenerateDailyHotpicks(ctx)
+}
+
+func (s *service) GetHotpicks(ctx context.Context, userID int64, params *GetHotpicksParams) ([]*Hotpick, error) {
+    return s.repo.GetUserHotpicks(ctx, userID, params.Limit, params.ExcludeViewed)
+}
+
+func (s *service) RecordHotpickAction(ctx context.Context, hotpickID int64, action string) error {
+    // Would fetch hotpick, update action, and save
+    return nil
+}
+
+func (s *service) CalculateCompatibility(ctx context.Context, user1ID, user2ID int64) (float64, *CompatibilityFactors, error) {
+    // Get user profiles
+    user1Profile, err := s.repo.GetUserProfile(ctx, user1ID)
+    if err != nil {
+        return 0, nil, err
+    }
+    
+    user2Profile, err := s.repo.GetUserProfile(ctx, user2ID)
+    if err != nil {
+        return 0, nil, err
+    }
+    
+    return s.matchingEngine.CalculateCompatibility(ctx, user1Profile, user2Profile)
+}
+
+func (s *service) FindPotentialMatches(ctx context.Context, userID int64, filters *MatchFilters) ([]*UserInfo, error) {
+    // Implementation would use repo.FindCandidates
+    return nil, nil
 }
 
 func (s *service) CreateDateRequest(ctx context.Context, userID int64, dto *CreateDateRequestDTO) (*DateRequest, error) {
@@ -144,22 +201,12 @@ func (s *service) RespondToDateRequest(ctx context.Context, requestID int64, use
 }
 
 func (s *service) GetUpcomingDates(ctx context.Context, userID int64) ([]*DateRequest, error) {
-    query := `
-        SELECT * FROM date_requests
-        WHERE (sender_id = $1 OR receiver_id = $1)
-        AND status = 'accepted'
-        AND proposed_date > NOW()
-        ORDER BY proposed_date ASC
-    `
-    
-    var dates []*DateRequest
-    err := s.repo.db.SelectContext(ctx, &dates, query, userID)
-    return dates, err
+    return s.repo.GetUpcomingDates(ctx, userID)
 }
 
 func (s *service) CreateMatch(ctx context.Context, user1ID, user2ID int64, matchType string) (*Match, error) {
-    // Calculate compatibility score
-    score, _, err := s.matchingEngine.CalculateCompatibility(ctx, user1ID, user2ID)
+    // Calculate compatibility score using the existing method
+    score, _, err := s.CalculateCompatibility(ctx, user1ID, user2ID)
     if err != nil {
         score = 0.5 // Default score on error
     }
@@ -184,6 +231,24 @@ func (s *service) CreateMatch(ctx context.Context, user1ID, user2ID int64, match
     // s.hub.NotifyMatch(user1ID, user2ID, match)
     
     return match, nil
+}
+
+func (s *service) CancelDateRequest(ctx context.Context, requestID int64, userID int64) error {
+    request, err := s.repo.GetDateRequest(ctx, requestID)
+    if err != nil {
+        return err
+    }
+    
+    if request.SenderID != userID {
+        return ErrUnauthorized
+    }
+    
+    if request.Status != "pending" {
+        return errors.New("can only cancel pending requests")
+    }
+    
+    request.Status = "cancelled"
+    return s.repo.UpdateDateRequest(ctx, request)
 }
 
 func (s *service) UnmatchUser(ctx context.Context, matchID int64, userID int64) error {
@@ -212,6 +277,8 @@ func (s *service) GenerateDailyHotpicks(ctx context.Context) error {
 
 func (s *service) SendDateReminders(ctx context.Context) error {
     // Get upcoming dates in next 2 hours
+    db := s.repo.GetDB()
+    
     query := `
         SELECT * FROM date_requests
         WHERE status = 'accepted'
@@ -223,7 +290,7 @@ func (s *service) SendDateReminders(ctx context.Context) error {
     `
     
     var dates []*DateRequest
-    err := s.repo.db.SelectContext(ctx, &dates, query)
+    err := db.SelectContext(ctx, &dates, query)
     if err != nil {
         return err
     }
@@ -240,7 +307,7 @@ func (s *service) SendDateReminders(ctx context.Context) error {
             ON CONFLICT (date_request_id) 
             DO UPDATE SET reminder_sent = TRUE, reminder_time = NOW()
         `
-        s.repo.db.ExecContext(ctx, scheduleQuery, date.ID, date.ProposedDate)
+        db.ExecContext(ctx, scheduleQuery, date.ID, date.ProposedDate)
     }
     
     return nil

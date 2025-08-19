@@ -7,6 +7,33 @@ import (
     "encoding/json"
 )
 
+// UserInfo represents basic user information
+type UserInfo struct {
+    ID             int64        `json:"id" db:"id"`
+    Username       string       `json:"username" db:"username"`
+    DisplayName    string       `json:"display_name" db:"display_name"`
+    ProfilePicture *string      `json:"profile_picture,omitempty" db:"profile_picture"`
+    IsOnline       bool         `json:"is_online,omitempty"`
+    LastSeen       *time.Time   `json:"last_seen,omitempty" db:"last_seen"`
+}
+
+// Reaction represents a message reaction
+type Reaction struct {
+    ID        int64     `json:"id" db:"id"`
+    MessageID int64     `json:"message_id" db:"message_id"`
+    UserID    int64     `json:"user_id" db:"user_id"`
+    Emoji     string    `json:"emoji" db:"emoji"`
+    CreatedAt time.Time `json:"created_at" db:"created_at"`
+    User      *UserInfo `json:"user,omitempty"`
+}
+
+// PushTokenRequest for registering push tokens
+type PushTokenRequest struct {
+    Token    string `json:"token" validate:"required"`
+    Platform string `json:"platform" validate:"required,oneof=ios android web"`
+    DeviceID string `json:"device_id" validate:"required"`
+}
+
 // Conversation represents a chat conversation
 type Conversation struct {
     ID                  int64           `json:"id" db:"id"`
@@ -41,6 +68,8 @@ type Participant struct {
     NotificationPreference string    `json:"notification_preference" db:"notification_preference"`
     UnreadCount           int        `json:"unread_count" db:"unread_count"`
     IsTyping              bool       `json:"is_typing" db:"is_typing"`
+    MutedUntil           *time.Time `json:"muted_until,omitempty" db:"muted_until"`
+    TypingStartedAt       *time.Time `json:"typing_started_at,omitempty" db:"typing_started_at"`
     
     // Joined fields
     User                  *UserInfo  `json:"user,omitempty"`
@@ -121,3 +150,4 @@ type SendMessageRequest struct {
     ParentMessageID *int64          `json:"parent_message_id,omitempty"`
     Metadata        json.RawMessage `json:"metadata,omitempty"`
 }
+

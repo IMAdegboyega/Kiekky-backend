@@ -10,12 +10,6 @@ import (
     "time"
 )
 
-// Define WSMessage struct (should be defined elsewhere, but adding basic version)
-type WSMessage struct {
-    Type    string      `json:"type"`
-    Payload interface{} `json:"payload"`
-}
-
 // Hub maintains active websocket connections
 type Hub struct {
     // Registered clients
@@ -192,7 +186,14 @@ func (h *Hub) sendPendingMessages(client *Client) {
     
     // Send each pending message
     for _, msg := range messages {
-        data, err := json.Marshal(msg)
+        // Create WSMessage wrapper for consistency
+        wsMsg := WSMessage{
+            Type:      string(WSTypeMessage),
+            Data:      mustMarshalJSON(msg),
+            Timestamp: msg.CreatedAt,
+        }
+        
+        data, err := json.Marshal(wsMsg)
         if err != nil {
             log.Printf("Error marshalling pending message: %v", err)
             continue
@@ -200,8 +201,8 @@ func (h *Hub) sendPendingMessages(client *Client) {
         
         select {
         case client.send <- data:
-            // Mark message as delivered
-            go h.service.MarkMessageDelivered(h.ctx, msg.ID)
+            // Mark message as delivered for this specific user
+            go h.service.MarkMessageDelivered(h.ctx, msg.ID, client.userID)
         default:
             // Channel blocked, skip
         }
@@ -224,10 +225,11 @@ func (h *Hub) notifyOnlineStatus(userID int64, online bool) {
     
     msg := WSMessage{
         Type: "presence",
-        Payload: map[string]interface{}{
+        Data: mustMarshalJSON(map[string]interface{}{
             "user_id": userID,
             "status":  status,
-        },
+        }),
+        Timestamp: time.Now(),
     }
     
     // Notify each contact
@@ -299,7 +301,50 @@ func (h *Hub) IsUserOnline(userID int64) bool {
     return exists
 }
 
+func (h *Hub) BroadcastToConversation(conversationID int64, message *WSMessage) {
+    // Get all participants
+    participants, err := h.service.GetConversationParticipants(context.Background(), conversationID)
+    if err != nil {
+        return
+    }
+    
+    // Send to all participants
+    for _, p := range participants {
+        h.SendToUser(p.UserID, *message)
+    }
+}
+
+func (h *Hub) BroadcastToConversationExcept(conversationID int64, exceptUserID int64, message *WSMessage) {
+    // Get all participants
+    participants, err := h.service.GetConversationParticipants(context.Background(), conversationID)
+    if err != nil {
+        return
+    }
+    
+    // Send to all except specified user
+    for _, p := range participants {
+        if p.UserID != exceptUserID {
+            h.SendToUser(p.UserID, *message)
+        }
+    }
+}
+
 func (h *Hub) Shutdown() {
     h.cancel()
     h.wg.Wait() // Wait for Run() to exit
+}
+
+func (h *Hub) GetActiveConnections() int {
+    h.clientsMux.RLock()
+    defer h.clientsMux.RUnlock()
+    return len(h.clients)
+}
+
+func mustMarshalJSON(v interface{}) json.RawMessage {
+    data, err := json.Marshal(v)
+    if err != nil {
+        log.Printf("Error marshaling: %v", err)
+        return json.RawMessage(`{}`)
+    }
+    return json.RawMessage(data)
 }

@@ -1,3 +1,5 @@
+// internal/notification/service.go
+
 package notifications
 
 import (
