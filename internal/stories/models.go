@@ -1,8 +1,9 @@
+// internal/stories/models.go
+
 package stories
 
 import (
     "time"
-    "database/sql/driver"
     "github.com/lib/pq"
 )
 
@@ -95,14 +96,4 @@ type StoriesResponse struct {
     Stories    []*Story `json:"stories"`
     TotalCount int      `json:"total_count"`
     HasMore    bool     `json:"has_more"`
-}
-
-// Scan implements sql.Scanner for pq.Int64Array
-func (a *pq.Int64Array) Scan(src interface{}) error {
-    return (*pq.Int64Array)(a).Scan(src)
-}
-
-// Value implements driver.Valuer for pq.Int64Array
-func (a pq.Int64Array) Value() (driver.Value, error) {
-    return pq.Array(a).Value()
 }
